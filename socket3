@@ -1,6 +1,6 @@
 (function (window) {
     'use strict';
-
+    console.log("v.1.0.1");
     class EventManager {
         constructor() {
             this.events = new Map();
