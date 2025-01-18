@@ -1,5 +1,6 @@
 (function (window) {
     'use strict';
+    console.log('v1.0.1');
     if (window.createChatInterceptor) return;
 
     class EventManager {
@@ -36,6 +37,12 @@
         overrideWebSocket() {
             const self = this, maxReconnect = 5;
             const wrapSocket = (url, protocols, attempt = 0) => {
+                // Only allow one active connection per URL (and protocols).
+                for (const conn of self.activeConnections) {
+                    if (conn.url === url && conn.protocols === protocols && conn.instance.readyState !== self.originalWebSocket.CLOSED) {
+                        return conn.instance;
+                    }
+                }
                 const ws = protocols ? new self.originalWebSocket(url, protocols) : new self.originalWebSocket(url);
                 const connection = { url, protocols, instance: ws, attempt };
                 self.activeConnections.add(connection);
