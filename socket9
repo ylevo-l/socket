@@ -1,6 +1,6 @@
 (function(w){
     "use strict";
-    console.log("v.1.0.4");
+    console.log("v.1.0.5");
     class EventManager {
         constructor(){this.events={}}
         subscribe(event,handler){if(!this.events[event])this.events[event]=new Set();this.events[event].add(handler);return ()=>this.unsubscribe(event,handler)}
