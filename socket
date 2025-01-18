@@ -1,43 +1,98 @@
-// ==UserScript==
-// @name         Chat Interceptor Client
-// @namespace    http://your.namespace.here
-// @version      1.0
-// @description  Intercepts WebSocket chat messages and logs them with usernames.
-// @author       Your Name
-// @match        *://*/*
-// @grant        none
-// @require      https://raw.githubusercontent.com/ylevo-l/socket/refs/heads/main/socket
-// ==/UserScript==
-
-(function () {
+(function (window) {
     'use strict';
+    if (window.createChatInterceptor) return;
 
-    // Initialize the chat interceptor with a WebSocket filter.
-    // Adjust wsFilter to target the appropriate WebSocket URL if necessary.
-    var chatInterceptor = window.createChatInterceptor({
-        wsFilter: 'wss://ws-us2.pusher.com'
-    });
-
-    // Subscribe to chat messages.
-    chatInterceptor.onChatMessage(function (chatData) {
-        // Use chatData.sender.username and chatData.content since this is the current format.
-        if (chatData && chatData.sender && chatData.sender.username && chatData.content) {
-            console.log('[' + chatData.sender.username + ']: ' + chatData.content);
-        } else {
-            console.warn('Unexpected chat data format:', chatData);
+    class EventManager {
+        constructor() {
+            this.events = new Map();
         }
-    });
+        subscribe(event, handler) {
+            if (!this.events.has(event)) this.events.set(event, new Set());
+            this.events.get(event).add(handler);
+            return () => this.unsubscribe(event, handler);
+        }
+        unsubscribe(event, handler) {
+            this.events.get(event)?.delete(handler);
+        }
+        dispatch(event, data) {
+            this.events.get(event)?.forEach(handler => {
+                try {
+                    handler(data);
+                } catch (err) {
+                    console.error(`Error in "${event}" handler:`, err);
+                }
+            });
+        }
+    }
 
-    // (Optional) Log WebSocket connection events.
-    chatInterceptor.onOpen(function (connection) {
-        console.info('WebSocket connection opened: ' + connection.url);
-    });
-    chatInterceptor.onClose(function (connection) {
-        console.info('WebSocket connection closed: ' + connection.url);
-    });
+    class WebSocketInterceptor {
+        constructor(dispatcher, filter) {
+            this.dispatcher = dispatcher;
+            this.filter = filter || '';
+            this.activeConnections = new Set();
+            this.originalWebSocket = window.WebSocket;
+            this.overrideWebSocket();
+        }
+        overrideWebSocket() {
+            const self = this, maxReconnect = 5;
+            const wrapSocket = (url, protocols, attempt = 0) => {
+                const ws = protocols ? new self.originalWebSocket(url, protocols) : new self.originalWebSocket(url);
+                const connection = { url, protocols, instance: ws, attempt };
+                self.activeConnections.add(connection);
+                ws.addEventListener('open', () => {
+                    connection.attempt = 0;
+                    self.dispatcher.dispatch('open', connection);
+                });
+                ws.addEventListener('message', event => {
+                    self.dispatcher.dispatch('message', { connection, data: event.data });
+                });
+                ws.addEventListener('close', () => {
+                    self.activeConnections.delete(connection);
+                    self.dispatcher.dispatch('close', connection);
+                    if (attempt < maxReconnect) {
+                        setTimeout(() => wrapSocket(url, protocols, attempt + 1), Math.min(1000 * (2 ** attempt), 30000));
+                    }
+                });
+                return ws;
+            };
+            window.WebSocket = (url, protocols) => {
+                return (self.filter === '' || url.startsWith(self.filter))
+                    ? wrapSocket(url, protocols)
+                    : protocols
+                        ? new self.originalWebSocket(url, protocols)
+                        : new self.originalWebSocket(url);
+            };
+            window.WebSocket.prototype = this.originalWebSocket.prototype;
+            Object.keys(this.originalWebSocket).forEach(key => {
+                window.WebSocket[key] = this.originalWebSocket[key];
+            });
+            this.dispatcher.dispatch('init', null);
+        }
+        getActiveConnections() {
+            return Array.from(this.activeConnections);
+        }
+    }
 
-    // (Optional) To view all raw WebSocket messages (for debugging):
-    // chatInterceptor.onMessage(function (payload) {
-    //     console.debug('Raw WebSocket message:', payload.data);
-    // });
-})();
+    function createChatInterceptor(options = {}) {
+        const eventManager = new EventManager();
+        const wsInterceptor = new WebSocketInterceptor(eventManager, options.wsFilter || '');
+        eventManager.subscribe('message', ({ data }) => {
+            try {
+                const message = JSON.parse(data);
+                if (message.event === 'App\\Events\\ChatMessageEvent' && message.data) {
+                    const chat = JSON.parse(message.data);
+                    eventManager.dispatch('chatMessage', chat);
+                }
+            } catch {}
+        });
+        return {
+            onChatMessage: handler => eventManager.subscribe('chatMessage', handler),
+            onMessage: handler => eventManager.subscribe('message', handler),
+            onOpen: handler => eventManager.subscribe('open', handler),
+            onClose: handler => eventManager.subscribe('close', handler),
+            getActiveConnections: () => wsInterceptor.getActiveConnections()
+        };
+    }
+
+    window.createChatInterceptor = createChatInterceptor;
+})(window);
