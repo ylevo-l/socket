@@ -1,1 +1,43 @@
+// ==UserScript==
+// @name         Chat Interceptor Client
+// @namespace    http://your.namespace.here
+// @version      1.0
+// @description  Intercepts WebSocket chat messages and logs them with usernames.
+// @author       Your Name
+// @match        *://*/*
+// @grant        none
+// @require      https://raw.githubusercontent.com/ylevo-l/socket/refs/heads/main/socket
+// ==/UserScript==
 
+(function () {
+    'use strict';
+
+    // Initialize the chat interceptor with a WebSocket filter.
+    // Adjust wsFilter to target the appropriate WebSocket URL if necessary.
+    var chatInterceptor = window.createChatInterceptor({
+        wsFilter: 'wss://ws-us2.pusher.com'
+    });
+
+    // Subscribe to chat messages.
+    chatInterceptor.onChatMessage(function (chatData) {
+        // Use chatData.sender.username and chatData.content since this is the current format.
+        if (chatData && chatData.sender && chatData.sender.username && chatData.content) {
+            console.log('[' + chatData.sender.username + ']: ' + chatData.content);
+        } else {
+            console.warn('Unexpected chat data format:', chatData);
+        }
+    });
+
+    // (Optional) Log WebSocket connection events.
+    chatInterceptor.onOpen(function (connection) {
+        console.info('WebSocket connection opened: ' + connection.url);
+    });
+    chatInterceptor.onClose(function (connection) {
+        console.info('WebSocket connection closed: ' + connection.url);
+    });
+
+    // (Optional) To view all raw WebSocket messages (for debugging):
+    // chatInterceptor.onMessage(function (payload) {
+    //     console.debug('Raw WebSocket message:', payload.data);
+    // });
+})();
