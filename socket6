@@ -1,0 +1,114 @@
+(function (window) {
+    'use strict';
+    console.log("v.1.0.3");
+    class EventManager {
+        constructor() {
+            this.events = {};
+        }
+
+        subscribe(event, handler) {
+            if (!this.events[event]) this.events[event] = new Set();
+            this.events[event].add(handler);
+            return () => this.unsubscribe(event, handler);
+        }
+
+        unsubscribe(event, handler) {
+            this.events[event]?.delete(handler);
+        }
+
+        dispatch(event, data) {
+            this.events[event]?.forEach(handler => {
+                try {
+                    handler(data);
+                } catch (err) {
+                    console.error(`Error in "${event}" handler:`, err);
+                }
+            });
+        }
+    }
+
+    class WebSocketInterceptor {
+        constructor(dispatcher, filter) {
+            this.dispatcher = dispatcher;
+            this.filter = filter || '';
+            this.activeConnections = new Set();
+            this.originalWebSocket = window.WebSocket;
+            this.overrideWebSocket();
+        }
+
+        overrideWebSocket() {
+            const self = this;
+            window.WebSocket = function (url, protocols) {
+                const isTarget = self.filter === '' || url.startsWith(self.filter);
+                const ws = protocols ? new self.originalWebSocket(url, protocols) : new self.originalWebSocket(url);
+                let reconnectAttempts = 0;
+                const maxReconnect = 5;
+
+                if (isTarget) {
+                    const connection = { url, protocols, instance: ws };
+                    self.activeConnections.add(connection);
+                    self.dispatcher.dispatch('open', connection);
+
+                    const reconnect = () => {
+                        if (reconnectAttempts < maxReconnect) {
+                            setTimeout(() => {
+                                reconnectAttempts++;
+                                const newWs = protocols ? new self.originalWebSocket(url, protocols) : new self.originalWebSocket(url);
+                                self.activeConnections.delete(connection);
+                                self.activeConnections.add({ url, protocols, instance: newWs });
+                                self.dispatcher.dispatch('open', { url, protocols, instance: newWs });
+                                newWs.addEventListener('open', () => self.dispatcher.dispatch('open', { url, protocols, instance: newWs }));
+                                newWs.addEventListener('close', reconnect);
+                                newWs.addEventListener('message', event => self.dispatcher.dispatch('message', { connection: { url, protocols, instance: newWs }, data: event.data }));
+                            }, Math.min(1000 * 2 ** reconnectAttempts, 30000));
+                        } else {
+                            self.activeConnections.delete(connection);
+                            self.dispatcher.dispatch('close', connection);
+                        }
+                    };
+
+                    ws.addEventListener('close', reconnect);
+                    ws.addEventListener('message', event => self.dispatcher.dispatch('message', { connection, data: event.data }));
+                }
+                return ws;
+            };
+
+            window.WebSocket.prototype = this.originalWebSocket.prototype;
+            Object.keys(this.originalWebSocket).forEach(key => {
+                window.WebSocket[key] = this.originalWebSocket[key];
+            });
+
+            this.dispatcher.dispatch('init', null);
+        }
+
+        getActiveConnections() {
+            return Array.from(this.activeConnections);
+        }
+    }
+
+    function createChatInterceptor(options = {}) {
+        const eventManager = new EventManager();
+        const wsInterceptor = new WebSocketInterceptor(eventManager, options.wsFilter || '');
+
+        eventManager.subscribe('message', ({ data }) => {
+            try {
+                const message = JSON.parse(data);
+                if (message.event === 'App\\Events\\ChatMessageEvent' && message.data) {
+                    const chat = JSON.parse(message.data);
+                    eventManager.dispatch('chatMessage', chat);
+                }
+            } catch {}
+        });
+
+        return {
+            onChatMessage: handler => eventManager.subscribe('chatMessage', handler),
+            onMessage: handler => eventManager.subscribe('message', handler),
+            onOpen: handler => eventManager.subscribe('open', handler),
+            onClose: handler => eventManager.subscribe('close', handler),
+            getActiveConnections: () => wsInterceptor.getActiveConnections(),
+        };
+    }
+
+    window.createChatInterceptor = createChatInterceptor;
+
+})(window);
