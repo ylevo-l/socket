@@ -1,68 +1,83 @@
 (function(w){
-    'use strict';
-    console.log("v.1.0.5");
+    "use strict";
+    console.log("v.1.0.4");
     class EventManager {
-        constructor(){this.events=new Map()}
-        subscribe(e,h){(this.events.get(e)||this.events.set(e,new Set()).get(e)).add(h);return ()=>this.unsubscribe(e,h)}
-        unsubscribe(e,h){this.events.get(e)?.delete(h)}
-        dispatch(e,d){this.events.get(e)?.forEach(h=>{try{h(d)}catch(err){console.error(`Error in "${e}" handler:`,err)}})}
+        constructor(){this.events={}}
+        subscribe(event,handler){if(!this.events[event])this.events[event]=new Set();this.events[event].add(handler);return ()=>this.unsubscribe(event,handler)}
+        unsubscribe(event,handler){this.events[event]?.delete(handler)}
+        dispatch(event,data){this.events[event]?.forEach(h=>{try{h(data)}catch(err){console.error(`Error in "${event}" handler:`,err)}})}
     }
     class WebSocketInterceptor {
-        constructor(d,f){this.dispatcher=d;this.filter=f||'';this.activeConnections=new Set();this.originalWebSocket=w.WebSocket;this.overrideWebSocket()}
+        constructor(dispatcher,filter){
+            this.dispatcher=dispatcher;
+            this.filter=filter||'';
+            this.activeConnections=new Set();
+            this.originalWebSocket=w.WebSocket;
+            this.overrideWebSocket();
+        }
         overrideWebSocket(){
-            w.WebSocket=(url,protocols)=>{
-                const isTarget=!this.filter||url.startsWith(this.filter),ws=protocols?new this.originalWebSocket(url,protocols):new this.originalWebSocket(url);
-                let reconnectAttempts=0,maxReconnect=5;
+            const self=this;
+            w.WebSocket=function(url,protocols){
+                const isTarget=self.filter===''||url.startsWith(self.filter);
+                const ws=protocols?new self.originalWebSocket(url,protocols):new self.originalWebSocket(url);
+                let reconnectAttempts=0, maxReconnect=5;
                 if(isTarget){
                     const connection={url,protocols,instance:ws};
-                    this.activeConnections.add(connection);
-                    this.dispatcher.dispatch('open',connection);
+                    self.activeConnections.add(connection);
+                    self.dispatcher.dispatch("open",connection);
                     const reconnect=()=>{
-                        if(reconnectAttempts++<maxReconnect){
+                        if(reconnectAttempts<maxReconnect){
                             setTimeout(()=>{
-                                const newWs=protocols?new this.originalWebSocket(url,protocols):new this.originalWebSocket(url);
-                                this.activeConnections.delete(connection);
+                                reconnectAttempts++;
+                                const newWs=protocols?new self.originalWebSocket(url,protocols):new self.originalWebSocket(url);
+                                self.activeConnections.delete(connection);
                                 const newConnection={url,protocols,instance:newWs};
-                                this.activeConnections.add(newConnection);
-                                this.dispatcher.dispatch('open',newConnection);
-                                newWs.addEventListener('open',()=>this.dispatcher.dispatch('open',newConnection));
-                                newWs.addEventListener('close',reconnect);
-                                newWs.addEventListener('message',e=>this.dispatcher.dispatch('message',{connection:newConnection,data:e.data}));
-                            },Math.min(1000*2**(reconnectAttempts-1),30000))
-                        }else{
-                            this.activeConnections.delete(connection);
-                            this.dispatcher.dispatch('close',connection)
+                                self.activeConnections.add(newConnection);
+                                self.dispatcher.dispatch("open",newConnection);
+                                newWs.addEventListener("open",()=>self.dispatcher.dispatch("open",newConnection));
+                                newWs.addEventListener("close",reconnect);
+                                newWs.addEventListener("message",e=>self.dispatcher.dispatch("message",{connection:newConnection,data:e.data}));
+                            },Math.min(1000*Math.pow(2,reconnectAttempts),30000))
+                        } else {
+                            self.activeConnections.delete(connection);
+                            self.dispatcher.dispatch("close",connection)
                         }
                     };
-                    ws.addEventListener('close',reconnect);
-                    ws.addEventListener('message',e=>this.dispatcher.dispatch('message',{connection,data:e.data}))
+                    ws.addEventListener("close",reconnect);
+                    ws.addEventListener("message",e=>self.dispatcher.dispatch("message",{connection,data:e.data}))
                 }
                 return ws;
             };
             w.WebSocket.prototype=this.originalWebSocket.prototype;
             Object.getOwnPropertyNames(this.originalWebSocket).forEach(key=>{
-                const descriptor=Object.getOwnPropertyDescriptor(this.originalWebSocket,key);
-                if(descriptor?.writable)try{w.WebSocket[key]=this.originalWebSocket[key]}catch(e){}
+                if(key==="length"||key==="name"||key==="prototype")return;
+                try {
+                    const desc=Object.getOwnPropertyDescriptor(this.originalWebSocket,key);
+                    Object.defineProperty(w.WebSocket,key,desc)
+                } catch(e){}
             });
-            this.dispatcher.dispatch('init',null)
+            this.dispatcher.dispatch("init",null)
         }
         getActiveConnections(){return Array.from(this.activeConnections)}
     }
-    const createChatInterceptor=(options={})=>{
-        const em=new EventManager,ws=new WebSocketInterceptor(em,options.wsFilter||'');
-        em.subscribe('message',({data})=>{
+    function createChatInterceptor(options={}){
+        const eventManager=new EventManager, wsInterceptor=new WebSocketInterceptor(eventManager,options.wsFilter||'');
+        eventManager.subscribe("message",({data})=>{
             try{
-                const msg=JSON.parse(data);
-                if(msg.event==='App\\Events\\ChatMessageEvent'&&msg.data)em.dispatch('chatMessage',JSON.parse(msg.data))
-            }catch{}
+                const message=JSON.parse(data);
+                if(message.event==="App\\Events\\ChatMessageEvent" && message.data){
+                    const chat=JSON.parse(message.data);
+                    eventManager.dispatch("chatMessage",chat)
+                }
+            } catch(e){}
         });
         return {
-            onChatMessage:h=>em.subscribe('chatMessage',h),
-            onMessage:h=>em.subscribe('message',h),
-            onOpen:h=>em.subscribe('open',h),
-            onClose:h=>em.subscribe('close',h),
-            getActiveConnections:()=>ws.getActiveConnections()
+            onChatMessage:handler=>eventManager.subscribe("chatMessage",handler),
+            onMessage:handler=>eventManager.subscribe("message",handler),
+            onOpen:handler=>eventManager.subscribe("open",handler),
+            onClose:handler=>eventManager.subscribe("close",handler),
+            getActiveConnections:()=>wsInterceptor.getActiveConnections()
         }
-    };
+    }
     w.createChatInterceptor=createChatInterceptor
 })(window);
