@@ -1,0 +1,136 @@
+
+(function (window) {
+  'use strict';
+
+  function EventManager() {
+    /** @private */
+    this.events = {};
+  }
+
+  EventManager.prototype.subscribe = function (event, handler) {
+    if (!this.events[event]) {
+      this.events[event] = [];
+    }
+    this.events[event].push(handler);
+    var self = this;
+    return function () {
+      self.unsubscribe(event, handler);
+    };
+  };
+
+  EventManager.prototype.unsubscribe = function (event, handler) {
+    if (!this.events[event]) return;
+    this.events[event] = this.events[event].filter(function (h) {
+      return h !== handler;
+    });
+  };
+
+  EventManager.prototype.dispatch = function (event, data) {
+    if (!this.events[event]) return;
+    this.events[event].forEach(function (handler) {
+      try {
+        handler(data);
+      } catch (err) {
+        console.error('Error in "' + event + '" event handler:', err);
+      }
+    });
+  };
+
+  function WebSocketInterceptor(dispatcher, filter) {
+    this.dispatcher = dispatcher;
+    this.filter = filter || '';
+    this.activeConnections = new Set();
+    this.originalWebSocket = window.WebSocket;
+    this.overrideWebSocket();
+  }
+
+  WebSocketInterceptor.prototype.overrideWebSocket = function () {
+    var self = this;
+    window.WebSocket = function (url, protocols) {
+      var isTarget = self.filter === '' || url.indexOf(self.filter) === 0;
+      var ws = protocols
+        ? new self.originalWebSocket(url, protocols)
+        : new self.originalWebSocket(url);
+
+      if (isTarget) {
+        var connection = { url: url, protocols: protocols, instance: ws };
+        self.activeConnections.add(connection);
+        self.dispatcher.dispatch('open', connection);
+
+        ws.addEventListener('open', function () {
+          self.dispatcher.dispatch('open', connection);
+        });
+
+        ws.addEventListener('close', function () {
+          self.activeConnections.delete(connection);
+          self.dispatcher.dispatch('close', connection);
+        });
+
+        ws.addEventListener('message', function (event) {
+          self.dispatcher.dispatch('message', { connection: connection, data: event.data });
+        });
+      }
+      return ws;
+    };
+
+    // Copy over properties from the original WebSocket.
+    window.WebSocket.prototype = this.originalWebSocket.prototype;
+    Object.keys(this.originalWebSocket).forEach(function (key) {
+      window.WebSocket[key] = self.originalWebSocket[key];
+    });
+
+    this.dispatcher.dispatch('init', null);
+  };
+
+  WebSocketInterceptor.prototype.getActiveConnections = function () {
+    return Array.from(this.activeConnections);
+  };
+
+  function createChatInterceptor(options) {
+    options = options || {};
+    var eventManager = new EventManager();
+    var wsInterceptor = new WebSocketInterceptor(eventManager, options.wsFilter || '');
+
+    // Listen for raw message events and extract chat messages.
+    eventManager.subscribe('message', function (payload) {
+      var data = payload.data;
+      try {
+        var message = JSON.parse(data);
+        // Check for the expected chat message event (adjust the event name if necessary).
+        if (message.event === 'App\\Events\\ChatMessageEvent' && message.data) {
+          // Assumes the chat payload is a JSON encoded string.
+          var chat = JSON.parse(message.data);
+          eventManager.dispatch('chatMessage', chat);
+        }
+      } catch (err) {
+        // Ignore JSON parsing errors
+      }
+    });
+
+    return {
+      onChatMessage: function (handler) {
+        return eventManager.subscribe('chatMessage', handler);
+      },
+
+      onMessage: function (handler) {
+        return eventManager.subscribe('message', handler);
+      },
+
+      onOpen: function (handler) {
+        return eventManager.subscribe('open', handler);
+      },
+
+      onClose: function (handler) {
+        return eventManager.subscribe('close', handler);
+      },
+
+      getActiveConnections: function () {
+        return wsInterceptor.getActiveConnections();
+      }
+    };
+  }
+
+  // Expose the factory function to the global namespace.
+  window.createChatInterceptor = createChatInterceptor;
+
+})(window);
